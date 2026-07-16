@@ -972,6 +972,14 @@ class LocalEnvironment(BaseEnvironment):
             if init_files:
                 cmd_string = _prepend_shell_init(cmd_string, init_files)
         args = [bash, "-l", "-c", cmd_string] if login else [bash, "-c", cmd_string]
+        # Wall B / A27: always confine host shell (fail-closed if wrapper missing)
+        _WRAPPER = "/usr/local/lib/artemis/artemis_hermes_bwrap.sh"
+        if not (os.path.isfile(_WRAPPER) and os.access(_WRAPPER, os.X_OK)):
+            raise RuntimeError(
+                "artemis shell wrapper missing — Wall B fail-closed "
+                f"(expected {_WRAPPER})"
+            )
+        args = [_WRAPPER] + args
         run_env = _make_run_env(self.env)
 
         # Recover when the cwd has been deleted out from under us — usually by
