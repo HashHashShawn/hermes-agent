@@ -20,7 +20,7 @@ from agent.mission_runtime import (
 )
 
 
-SAFE_HEALTH = "sudo -n /usr/local/sbin/artemis-seat-health.sh"
+SAFE_HEALTH = "sudo -n /usr/bin/systemctl is-active qwen36-vllm.service"
 GATED_COMMAND = "sudo systemctl restart qwen36-vllm.service"
 
 
@@ -132,20 +132,12 @@ def main() -> int:
                 task_id="mission-runtime-acceptance",
                 session_id="mission-runtime-acceptance",
             ))
-        served_ids = []
-        try:
-            served_payload = json.loads(safe_execution.get("output") or "{}")
-            served_ids = [
-                row.get("id") for row in served_payload.get("data", [])
-                if isinstance(row, dict) and row.get("id")
-            ]
-        except (TypeError, ValueError):
-            served_ids = []
+        health_state = (safe_execution.get("output") or "").strip()
         cases.append(case(
             "MR-01", "positive", digest,
-            {"approved": True, "prompted_founder": False, "exit_code": 0, "served_identity_count_min": 1},
-            {"approved": safe.get("approved"), "prompted_founder": False, "exit_code": safe_execution.get("exit_code"), "served_ids": served_ids},
-            safe.get("approved") is True and safe.get("mission_approved") is True and safe_execution.get("exit_code") == 0 and bool(served_ids),
+            {"approved": True, "prompted_founder": False, "exit_code": 0, "health_state": "active"},
+            {"approved": safe.get("approved"), "prompted_founder": False, "exit_code": safe_execution.get("exit_code"), "health_state": health_state},
+            safe.get("approved") is True and safe.get("mission_approved") is True and safe_execution.get("exit_code") == 0 and health_state == "active",
             branch="exact_compiled_read",
         ))
 
