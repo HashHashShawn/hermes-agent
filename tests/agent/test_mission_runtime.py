@@ -14,7 +14,7 @@ from agent.mission_runtime import (
 )
 
 
-SAFE_HEALTH = "curl -s http://127.0.0.1:8000/v1/models"
+SAFE_HEALTH = "sudo -n /usr/local/sbin/artemis-seat-health.sh"
 GATED_COMMAND = "sudo systemctl restart qwen36-vllm.service"
 
 
