@@ -20,7 +20,7 @@ from agent.mission_runtime import (
 )
 
 
-SAFE_HEALTH = "sudo -n /usr/bin/systemctl is-active qwen36-vllm.service"
+SAFE_HEALTH = "/usr/bin/systemctl is-active qwen36-vllm.service"
 GATED_COMMAND = "sudo systemctl restart qwen36-vllm.service"
 
 
