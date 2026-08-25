@@ -1211,7 +1211,18 @@ def _finalize_single_query(cli) -> None:
         _notify_single_query_session_finalize(cli)
         _run_cleanup(notify_session_finalize=False)
     finally:
-        cli._release_active_session()
+        # ``chat -q`` bypasses the interactive CLI shutdown path. Closing the
+        # agent here flushes its owned session row to a durable terminal state
+        # (``agent_close``) before the process releases the active-session
+        # lease. Those rows remain resumable; leaving ``ended_at`` NULL after
+        # the process exits falsely presents a dead one-shot worker as active.
+        try:
+            agent = getattr(cli, "agent", None)
+            close_agent = getattr(agent, "close", None)
+            if callable(close_agent):
+                close_agent()
+        finally:
+            cli._release_active_session()
 
 
 def _reset_terminal_input_modes_on_exit() -> None:

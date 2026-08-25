@@ -124,6 +124,83 @@ def test_exact_health_read_is_allowed_and_shell_variation_is_not(tmp_path, monke
     assert runtime.authorize_terminal(f"{SAFE_HEALTH} | python3 -m json.tool").allowed is False
 
 
+def test_process_tool_is_denied_by_strict_mission_policy(tmp_path, monkeypatch):
+    runtime, _ = _fixture(tmp_path, monkeypatch)
+
+    decision = runtime.authorize_tool(
+        "process",
+        {
+            "action": "submit",
+            "session_id": "existing-shell",
+            "data": "bash -c 'echo bypass'",
+        },
+    )
+
+    assert decision.allowed is False
+    assert "outside the compiled mission policy" in decision.reason
+    assert "process tool is unavailable" in runtime.prompt_block
+
+
+def test_process_submit_blocks_before_dispatch_and_skips_sibling(tmp_path, monkeypatch):
+    runtime, payload = _fixture(tmp_path, monkeypatch)
+    from run_agent import AIAgent
+
+    tool_defs = [{
+        "type": "function",
+        "function": {
+            "name": "process",
+            "description": "process",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }]
+    with (
+        patch("run_agent.get_tool_definitions", return_value=tool_defs),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="http://127.0.0.1:8000/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    agent.client = MagicMock()
+    agent._mission_runtime = runtime
+    calls = [
+        SimpleNamespace(
+            id="call-process",
+            function=SimpleNamespace(
+                name="process",
+                arguments=json.dumps({
+                    "action": "submit",
+                    "session_id": "existing-shell",
+                    "data": "bash -c 'echo bypass'",
+                }),
+            ),
+        ),
+        SimpleNamespace(
+            id="call-sibling",
+            function=SimpleNamespace(
+                name="terminal",
+                arguments=json.dumps({"command": SAFE_HEALTH}),
+            ),
+        ),
+    ]
+    assistant = SimpleNamespace(tool_calls=calls)
+    messages = []
+
+    with patch("run_agent.handle_function_call") as dispatch:
+        agent._execute_tool_calls(assistant, messages, "task-1")
+
+    dispatch.assert_not_called()
+    assert agent._mission_runtime_halt["verdict"] == "BLOCKED"
+    assert agent._mission_runtime_halt["blocker"]["tool_name"] == "process"
+    assert len(messages) == 2
+    assert json.loads(messages[1]["content"])["status"] == "skipped"
+    assert Path(payload["receipt_path"]).is_file()
+
+
 def test_compiled_health_read_bypasses_prompt_and_gated_command_stops_fast(tmp_path, monkeypatch):
     runtime, _ = _fixture(tmp_path, monkeypatch)
     from tools.approval import check_all_command_guards

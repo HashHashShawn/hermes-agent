@@ -123,6 +123,7 @@ def main() -> int:
         Path(__file__).resolve().parents[1] / "agent" / "agent_init.py",
         Path(__file__).resolve().parents[1] / "agent" / "tool_executor.py",
         Path(__file__).resolve().parents[1] / "tools" / "approval.py",
+        Path(__file__).resolve().parents[1] / "cli.py",
     ]
     digest = hashlib.sha256(
         "".join(sha(path) for path in source_paths).encode("ascii")
@@ -282,6 +283,116 @@ def main() -> int:
             {"coupling_before": coupling_before, "engineered_red_observed": red_observed, "fixture_restored": fixture_restored},
             coupling_before and red_observed and fixture_restored,
             branch="disclosure_enforcement_coupling",
+        ))
+
+        # The process tool is part of the terminal toolset but dispatches
+        # outside the terminal command guard. A strict mission must stop it
+        # before a valid background-session ID could become a shell-input
+        # bypass, and it must skip every later sibling in the same batch.
+        runtime3, _ = build_fixture(root / "process-boundary")
+        process_tool_defs = [{
+            "type": "function",
+            "function": {"name": "process", "description": "process", "parameters": {"type": "object", "properties": {}}},
+        }]
+        with (
+            patch("run_agent.get_tool_definitions", return_value=process_tool_defs),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            process_agent = AIAgent(api_key="test-key", base_url="http://127.0.0.1:8000/v1", quiet_mode=True, skip_context_files=True, skip_memory=True)
+        process_agent.client = MagicMock()
+        process_agent._mission_runtime = runtime3
+        process_calls = [
+            SimpleNamespace(id="call-process", function=SimpleNamespace(name="process", arguments=json.dumps({
+                "action": "submit",
+                "session_id": "existing-shell",
+                "data": "bash -c 'echo bypass'",
+            }))),
+            SimpleNamespace(id="call-sibling", function=SimpleNamespace(name="terminal", arguments=json.dumps({"command": SAFE_HEALTH}))),
+        ]
+        process_messages = []
+        with patch("run_agent.handle_function_call") as process_dispatch:
+            process_agent._execute_tool_calls(
+                SimpleNamespace(tool_calls=process_calls),
+                process_messages,
+                "harness-process-task",
+            )
+        process_second_tool_call = (
+            process_messages[1].get("tool_call_id")
+            if len(process_messages) == 2
+            and isinstance(process_messages[1], dict)
+            else None
+        )
+        process_blocker = process_agent._mission_runtime_halt.get("blocker", {})
+        cases.append(case(
+            "MR-09", "negative", digest,
+            {
+                "dispatch_count": 0,
+                "blocked_tool": "process",
+                "second_tool_call_id": "call-sibling",
+                "process_disclosed_unavailable": True,
+            },
+            {
+                "dispatch_count": process_dispatch.call_count,
+                "blocked_tool": process_blocker.get("tool_name"),
+                "second_tool_call_id": process_second_tool_call,
+                "process_disclosed_unavailable": "process tool is unavailable" in runtime3.prompt_block,
+            },
+            process_dispatch.call_count == 0
+            and process_blocker.get("tool_name") == "process"
+            and process_second_tool_call == "call-sibling"
+            and "process tool is unavailable" in runtime3.prompt_block,
+            branch="process_tool_fail_closed",
+        ))
+
+        # One-shot ``chat -q`` sessions bypass the interactive shutdown path.
+        # The finalizer must close the agent-owned durable session before it
+        # releases the active-session lease, including when cleanup raises.
+        import cli
+
+        finalize_calls = []
+        finalize_cli = SimpleNamespace(
+            agent=SimpleNamespace(
+                close=lambda: finalize_calls.append("agent_close"),
+            ),
+            _release_active_session=lambda: finalize_calls.append("release"),
+        )
+
+        def failing_cleanup(**_kwargs):
+            finalize_calls.append("cleanup")
+            raise RuntimeError("engineered cleanup failure")
+
+        cleanup_red_observed = False
+        with (
+            patch(
+                "cli._notify_single_query_session_finalize",
+                side_effect=lambda _cli: finalize_calls.append("finalize"),
+            ),
+            patch("cli._run_cleanup", side_effect=failing_cleanup),
+        ):
+            try:
+                cli._finalize_single_query(finalize_cli)
+            except RuntimeError as exc:
+                cleanup_red_observed = str(exc) == "engineered cleanup failure"
+        expected_finalize_order = ["finalize", "cleanup", "agent_close", "release"]
+        cases.append(case(
+            "MR-10", "system", digest,
+            {
+                "engineered_cleanup_red_observed": True,
+                "finalize_order": expected_finalize_order,
+                "session_close_before_release": True,
+            },
+            {
+                "engineered_cleanup_red_observed": cleanup_red_observed,
+                "finalize_order": finalize_calls,
+                "session_close_before_release": (
+                    "agent_close" in finalize_calls
+                    and "release" in finalize_calls
+                    and finalize_calls.index("agent_close") < finalize_calls.index("release")
+                ),
+            },
+            cleanup_red_observed and finalize_calls == expected_finalize_order,
+            branch="one_shot_session_finalization",
         ))
 
     production_after = snapshot(production_paths)

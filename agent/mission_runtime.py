@@ -240,7 +240,12 @@ class MissionRuntime:
             "alternate paths, network access, or any other terminal command will "
             "durably BLOCK the mission. After a blocked result, do not retry, "
             "rephrase, or substitute another command or tool path. Use the file "
-            "tool for permitted reads that are not listed terminal commands.\n"
+            "tool for permitted reads that are not listed terminal commands. "
+            "The process tool is unavailable in this strict mission; do not use "
+            "process list, poll, log, wait, kill, write, submit, or close. If a "
+            "required input moved, use the permitted file search and read tools. "
+            "If an optional receipt is absent, record UNKNOWN; do not invent a "
+            "terminal filter or discovery command.\n"
             f"{terminal_commands}\n"
             "--- RESOLVED MISSION ARTIFACT PATHS ---\n"
             f"state_path: {self.state_path}\n"
@@ -258,6 +263,35 @@ class MissionRuntime:
     @property
     def blocked_on_entry(self) -> bool:
         return self.state.get("status") == "BLOCKED" and not self.resume_requested
+
+    def authorize_tool(
+        self, tool_name: str, tool_args: dict[str, Any] | None = None
+    ) -> MissionToolDecision:
+        """Apply the compiled mission policy before any tool is dispatched.
+
+        ``process`` belongs to the terminal toolset and can write arbitrary
+        stdin to an existing background shell. It must not sit outside the
+        exact terminal-command envelope merely because it is a separate tool
+        name. Strict missions therefore deny it unless a future hash-bound
+        policy schema explicitly admits individual process operations.
+
+        Other tool families keep their existing contract/toolset controls.
+        The current v1 policy compiles only the terminal command boundary.
+        """
+        if tool_name == "terminal":
+            # Preserve the existing terminal handler as the enforcement and
+            # audit boundary. It applies ``authorize_terminal`` through the
+            # command guard before any shell execution.
+            return MissionToolDecision(
+                True,
+                "terminal command is checked by the strict command guard",
+            )
+        if tool_name == "process":
+            return MissionToolDecision(
+                False,
+                "process tool is outside the compiled mission policy",
+            )
+        return MissionToolDecision(True, "tool is not restricted by mission policy v1")
 
     def authorize_terminal(self, command: str) -> MissionToolDecision:
         normalized = (command or "").strip()

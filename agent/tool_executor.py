@@ -1026,13 +1026,32 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             tool_call_id=getattr(tool_call, "id", "") or "",
         )
 
-        # Check plugin hooks for a block directive before executing.
+        # Apply the strict mission policy before every tool dispatch. Terminal
+        # approval checks remain a defense in depth, but this central boundary
+        # also covers terminal-adjacent tools such as ``process`` that can send
+        # input to an existing shell without invoking the terminal handler.
         _block_msg: Optional[str] = None
         _block_error_type = "plugin_block"
         if _ts_scope_block is not None:
             _block_msg = _ts_scope_block
             _block_error_type = "tool_scope_block"
         else:
+            mission_runtime = getattr(agent, "_mission_runtime", None)
+            if mission_runtime is not None:
+                mission_decision = mission_runtime.authorize_tool(
+                    function_name, function_args
+                )
+                if not mission_decision.allowed:
+                    _block_msg = (
+                        "BLOCKED: Mission permission unavailable. "
+                        f"{mission_decision.reason}. Do NOT retry, rephrase, or "
+                        "attempt the same outcome through another command or tool."
+                    )
+                    _block_error_type = "mission_policy_block"
+
+        # Check plugin hooks only when scope and mission policy admitted the
+        # request. A mission denial is final for this run.
+        if _block_msg is None:
             try:
                 from hermes_cli.plugins import get_pre_tool_call_block_message
                 _block_msg = get_pre_tool_call_block_message(

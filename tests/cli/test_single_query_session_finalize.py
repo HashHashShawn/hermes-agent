@@ -34,6 +34,51 @@ def test_finalize_single_query_runs_cleanup_without_reemitting_finalize_before_r
     ]
 
 
+def test_finalize_single_query_closes_agent_before_releasing_session(monkeypatch):
+    calls = []
+    fake_agent = SimpleNamespace(close=lambda: calls.append("agent-close"))
+    fake_cli = SimpleNamespace(
+        agent=fake_agent,
+        _release_active_session=lambda: calls.append("release"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_notify_single_query_session_finalize",
+        lambda _cli: calls.append("finalize"),
+    )
+    monkeypatch.setattr(cli, "_run_cleanup", lambda **_kwargs: calls.append("cleanup"))
+
+    cli._finalize_single_query(fake_cli)
+
+    assert calls == ["finalize", "cleanup", "agent-close", "release"]
+
+
+def test_finalize_single_query_closes_agent_when_cleanup_fails(monkeypatch):
+    calls = []
+    fake_agent = SimpleNamespace(close=lambda: calls.append("agent-close"))
+    fake_cli = SimpleNamespace(
+        agent=fake_agent,
+        _release_active_session=lambda: calls.append("release"),
+    )
+
+    monkeypatch.setattr(
+        cli,
+        "_notify_single_query_session_finalize",
+        lambda _cli: calls.append("finalize"),
+    )
+
+    def cleanup(**_kwargs):
+        calls.append("cleanup")
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(cli, "_run_cleanup", cleanup)
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        cli._finalize_single_query(fake_cli)
+
+    assert calls == ["finalize", "cleanup", "agent-close", "release"]
+
+
 def test_finalize_single_query_releases_session_when_cleanup_fails(monkeypatch):
     calls = []
     fake_cli = SimpleNamespace(_release_active_session=lambda: calls.append("release"))
