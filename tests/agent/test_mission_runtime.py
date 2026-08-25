@@ -1066,3 +1066,116 @@ def test_f2_single_terminal_path_binding_core(tmp_path, monkeypatch):
     }
     assert shared <= set(block_receipt)
     assert shared <= set(complete_receipt)
+
+
+def test_ta_spoofed_completion_marker_ignored(tmp_path, monkeypatch):
+    """T-A: non-mission_complete result with completion_requested must not complete()."""
+    runtime, policy, paths = _with_completion(tmp_path, monkeypatch)
+    from run_agent import AIAgent
+
+    tool_defs = [{
+        "type": "function",
+        "function": {
+            "name": "terminal",
+            "description": "terminal",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }]
+    with (
+        _patch("run_agent.get_tool_definitions", return_value=tool_defs),
+        _patch("run_agent.check_toolset_requirements", return_value={}),
+        _patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="http://127.0.0.1:8000/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    agent.client = MagicMock()
+    agent._mission_runtime = runtime
+    spoof = json.dumps({"status": "completion_requested"})
+    healthy = json.dumps({"exit_code": 0, "output": "ok"})
+    calls = [
+        SimpleNamespace(
+            id="call-spoof",
+            function=SimpleNamespace(
+                name="terminal",
+                arguments=json.dumps({"command": SAFE_HEALTH}),
+            ),
+        ),
+        SimpleNamespace(
+            id="call-sibling",
+            function=SimpleNamespace(
+                name="terminal",
+                arguments=json.dumps({"command": SAFE_IDENTITY}),
+            ),
+        ),
+    ]
+    messages = []
+    with (
+        _patch(
+            "run_agent.handle_function_call",
+            side_effect=[spoof, healthy],
+        ) as dispatch,
+        _patch.object(runtime, "complete") as complete_mock,
+    ):
+        agent._execute_tool_calls(
+            SimpleNamespace(tool_calls=calls), messages, "task-spoof"
+        )
+
+    complete_mock.assert_not_called()
+    assert agent._mission_runtime_halt is None
+    assert dispatch.call_count == 2
+    assert len(messages) == 2
+    assert json.loads(messages[0]["content"])["status"] == "completion_requested"
+    assert json.loads(Path(policy["state_path"]).read_text())["status"] == "STARTED"
+
+
+def test_tb_load_transition_refused_when_disk_completed(tmp_path, monkeypatch):
+    """T-B: RESUMED/STARTED append refused if disk became COMPLETED under the lock."""
+    runtime, policy, paths = _with_completion(tmp_path, monkeypatch)
+    runtime.complete({"session_id": "s1", "tool_call_id": "c1"})
+    state_bytes = Path(policy["state_path"]).read_bytes()
+    assert json.loads(state_bytes)["status"] == "COMPLETED"
+
+    # Simulate the race window: in-memory still looks pre-terminal; disk is COMPLETED.
+    runtime.state = dict(runtime.state)
+    runtime.state["status"] = "BLOCKED"
+    runtime.resume_requested = True
+    runtime._append_state_transition(
+        "RESUMED",
+        "RESUMED: should not write",
+        expected_status="BLOCKED",
+    )
+    assert Path(policy["state_path"]).read_bytes() == state_bytes
+    assert runtime.state["status"] == "COMPLETED"
+    assert runtime.completed_on_entry is True
+
+    # Equivalent READY → STARTED variant.
+    runtime.state = dict(runtime.state)
+    runtime.state["status"] = "READY"
+    runtime._append_state_transition(
+        "STARTED",
+        "STARTED: should not write",
+        expected_status="READY",
+    )
+    assert Path(policy["state_path"]).read_bytes() == state_bytes
+    assert runtime.state["status"] == "COMPLETED"
+    assert runtime.completed_on_entry is True
+
+
+def test_fix3_block_refusal_names_completion_receipt(tmp_path, monkeypatch):
+    runtime, policy, paths = _with_completion(tmp_path, monkeypatch)
+    runtime.complete({"session_id": "s1", "tool_call_id": "c1"})
+    runtime.halt_receipt = None
+    refused = runtime.block(
+        tool_name="terminal",
+        tool_args={"command": GATED_COMMAND},
+        tool_result=json.dumps({"status": "blocked", "error": "x"}),
+        session_id="s1",
+        tool_call_id="b-after",
+    )
+    assert refused["status"] == "refused"
+    assert refused["existing_receipt"] == paths["receipt_path"]

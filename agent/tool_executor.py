@@ -38,6 +38,7 @@ from agent.tool_dispatch_helpers import (
     _append_subdir_hint_to_multimodal,
     make_tool_result_message,
 )
+from agent.mission_runtime import MISSION_COMPLETE_TOOL_NAME
 from tools.terminal_tool import (
     get_active_env,
 )
@@ -1184,7 +1185,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 middleware_trace=list(middleware_trace),
             )
         elif (
-            function_name == "mission_complete"
+            function_name == MISSION_COMPLETE_TOOL_NAME
             and getattr(agent, "_mission_runtime", None) is not None
         ):
             def _execute(next_args: dict) -> Any:
@@ -1664,8 +1665,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 )
             break
 
-        if _mission_runtime is not None and _mission_runtime.result_requests_completion(
-            function_result
+        if (
+            _mission_runtime is not None
+            and function_name == MISSION_COMPLETE_TOOL_NAME
+            and _mission_runtime.result_requests_completion(function_result)
         ):
             _completion = _mission_runtime.complete(
                 {

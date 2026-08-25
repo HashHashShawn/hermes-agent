@@ -447,6 +447,7 @@ class MissionRuntime:
             runtime._append_state_transition(
                 "STARTED",
                 "STARTED: Runtime activated the hash-bound mission envelope.",
+                expected_status="READY",
             )
             runtime._prompt_block = runtime._build_prompt_block()
         elif runtime.resume_requested and runtime.state.get("status") == "BLOCKED":
@@ -454,6 +455,7 @@ class MissionRuntime:
                 "RESUMED",
                 "RESUMED: Runtime loaded the durable blocker, contract, and next "
                 "legal action; no founder restatement was supplied.",
+                expected_status="BLOCKED",
             )
             runtime._prompt_block = runtime._build_prompt_block()
         return runtime
@@ -783,9 +785,22 @@ class MissionRuntime:
                     pass
             self._thread_lock.release()
 
-    def _append_state_transition(self, status: str, event: str) -> None:
+    def _append_state_transition(
+        self, status: str, event: str, *, expected_status: str
+    ) -> None:
         with self._lock_scope():
             current = json.loads(self.state_path.read_text(encoding="utf-8"))
+            if current.get("status") != expected_status:
+                _logger.info(
+                    "load_transition_refused mission_id=%s expected=%s actual=%s "
+                    "requested=%s",
+                    self.mission_id,
+                    expected_status,
+                    current.get("status"),
+                    status,
+                )
+                self.state = current
+                return
             history = list(current.get("history") or [])
             seq = _next_seq(history)
             history.append(
@@ -979,11 +994,23 @@ class MissionRuntime:
             current = json.loads(self.state_path.read_text(encoding="utf-8"))
             status = current.get("status")
             if status in {"BLOCKED", "COMPLETED"}:
-                existing = self.halt_receipt or {
-                    "receipt_path": str(self.receipt_path),
-                    "status": status,
-                    "verdict": status,
-                }
+                if self.halt_receipt is not None:
+                    existing_receipt = self.halt_receipt.get("receipt_path")
+                    existing = self.halt_receipt
+                elif status == "COMPLETED" and self._completion_block is not None:
+                    existing_receipt = str(self._completion_block["receipt_path"])
+                    existing = {
+                        "receipt_path": existing_receipt,
+                        "status": status,
+                        "verdict": status,
+                    }
+                else:
+                    existing_receipt = str(self.receipt_path)
+                    existing = {
+                        "receipt_path": existing_receipt,
+                        "status": status,
+                        "verdict": status,
+                    }
                 _logger.info(
                     "second terminal attempt refused mission_id=%s status=%s",
                     self.mission_id,
@@ -992,7 +1019,7 @@ class MissionRuntime:
                 return {
                     "status": "refused",
                     "reason": f"mission already terminal ({status})",
-                    "existing_receipt": existing.get("receipt_path"),
+                    "existing_receipt": existing_receipt,
                     "halt_receipt": existing if self.halt_receipt is not None else None,
                     **(
                         {
