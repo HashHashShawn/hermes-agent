@@ -301,7 +301,7 @@ def init_agent(
     # Optional strict mission runtime. It is inactive for normal Hermes chat.
     # A hash-bound mission injects its complete durable contract and state into
     # working context before the first model call.
-    from agent.mission_runtime import MissionRuntime
+    from agent.mission_runtime import MissionRuntime, mission_complete_tool_schema
     agent._mission_runtime = MissionRuntime.from_environment()
     agent._mission_runtime_halt = None
     if agent._mission_runtime is not None:
@@ -1095,6 +1095,17 @@ def init_agent(
                 print(f"   ❌ Disabled toolsets: {', '.join(disabled_toolsets)}")
     elif not agent.quiet_mode:
         print("🛠️  No tools loaded (all tools filtered out or unavailable)")
+
+    # Mission-scoped completion tool — never part of the core toolset.
+    if agent._mission_runtime is not None:
+        if agent.tools is None:
+            agent.tools = []
+        _mc_name = mission_complete_tool_schema()["name"]
+        if _mc_name not in agent.valid_tool_names:
+            agent.tools.append(
+                {"type": "function", "function": mission_complete_tool_schema()}
+            )
+            agent.valid_tool_names.add(_mc_name)
 
     # Kanban worker/orchestrator lifecycle guidance is session-static:
     # the dispatcher decides at spawn time whether this process is a kanban

@@ -395,6 +395,216 @@ def main() -> int:
             branch="one_shot_session_finalization",
         ))
 
+
+        # ── G1 controls MR-11..MR-16 ─────────────────────────────────────
+        from agent.mission_runtime import (
+            COMPLETE_RECEIPT_SCHEMA,
+            MISSION_COMPLETE_TOOL_NAME,
+        )
+
+        runtime_c, policy_c = build_fixture(root / "complete")
+        work_c = root / "complete" / "cwork"
+        work_c.mkdir(parents=True, exist_ok=True)
+        deliverable = work_c / "DELIVERABLE.md"
+        deliverable.write_text("done\n", encoding="utf-8")
+        policy_path_c = Path(os.environ["HERMES_MISSION_POLICY"])
+        payload_c = json.loads(policy_path_c.read_text(encoding="utf-8"))
+        payload_c["completion"] = {
+            "version": 1,
+            "predicates": [
+                {"type": "artifact_exists_nonempty", "path": str(deliverable)}
+            ],
+            "receipt_path": str(work_c / "complete_receipt.json"),
+            "checkpoint_path": str(root / "complete" / "mission" / "receipts" / "complete.json"),
+            "report_path": str(work_c / "COMPLETE_REPORT.md"),
+            "notification_path": str(root / "complete" / "mail" / "COMPLETE.md"),
+            "note": "ok",
+        }
+        (root / "complete" / "mail").mkdir(parents=True, exist_ok=True)
+        (root / "complete" / "mission" / "receipts").mkdir(parents=True, exist_ok=True)
+        policy_path_c.write_text(json.dumps(payload_c), encoding="utf-8")
+        os.environ["HERMES_MISSION_POLICY_SHA256"] = sha(policy_path_c)
+        runtime_c = MissionRuntime.from_environment()
+        complete_receipt = runtime_c.complete(
+            {"session_id": "harness-complete", "tool_call_id": "complete-1"}
+        )
+        state_c = json.loads(Path(policy_c["state_path"]).read_text())
+        cases.append(case(
+            "MR-11", "positive", digest,
+            {"status": "COMPLETED", "schema": COMPLETE_RECEIPT_SCHEMA},
+            {
+                "status": state_c.get("status"),
+                "schema": complete_receipt.get("schema"),
+            },
+            state_c.get("status") == "COMPLETED"
+            and complete_receipt.get("schema") == COMPLETE_RECEIPT_SCHEMA
+            and Path(payload_c["completion"]["receipt_path"]).is_file(),
+            branch="valid_completion",
+        ))
+
+        # MR-12 = V6+V8 second completion + block-after-complete
+        state_bytes = Path(policy_c["state_path"]).read_bytes()
+        second = runtime_c.complete({"session_id": "harness-complete", "tool_call_id": "complete-2"})
+        runtime_c.halt_receipt = None
+        block_after = runtime_c.block(
+            tool_name="terminal",
+            tool_args={"command": GATED_COMMAND},
+            tool_result=json.dumps({"status": "blocked", "error": "approval unavailable"}),
+            session_id="harness-complete",
+            tool_call_id="block-after",
+        )
+        cases.append(case(
+            "MR-12", "negative", digest,
+            {"state_unchanged": True, "second_refused_or_same": True, "block_refused": True},
+            {
+                "state_unchanged": Path(policy_c["state_path"]).read_bytes() == state_bytes,
+                "second_refused_or_same": (
+                    second.get("verdict") == "COMPLETED"
+                    or second.get("status") == "refused"
+                ),
+                "block_refused": (
+                    block_after.get("status") == "refused"
+                    or block_after.get("verdict") == "COMPLETED"
+                ),
+            },
+            Path(policy_c["state_path"]).read_bytes() == state_bytes,
+            branch="idempotent_terminal",
+        ))
+
+        # MR-13 = V2+V3 missing + symlink
+        runtime_m, policy_m = build_fixture(root / "missing")
+        work_m = root / "missing" / "cwork"
+        work_m.mkdir(parents=True, exist_ok=True)
+        missing_path = work_m / "MISSING.md"
+        policy_path_m = Path(os.environ["HERMES_MISSION_POLICY"])
+        payload_m = json.loads(policy_path_m.read_text(encoding="utf-8"))
+        payload_m["completion"] = {
+            "version": 1,
+            "predicates": [
+                {"type": "artifact_exists_nonempty", "path": str(missing_path)}
+            ],
+            "receipt_path": str(work_m / "complete_receipt.json"),
+            "checkpoint_path": str(root / "missing" / "mission" / "receipts" / "complete.json"),
+            "report_path": str(work_m / "COMPLETE_REPORT.md"),
+            "note": "ok",
+        }
+        (root / "missing" / "mission" / "receipts").mkdir(parents=True, exist_ok=True)
+        policy_path_m.write_text(json.dumps(payload_m), encoding="utf-8")
+        os.environ["HERMES_MISSION_POLICY_SHA256"] = sha(policy_path_m)
+        runtime_m = MissionRuntime.from_environment()
+        before_m = Path(policy_m["state_path"]).read_bytes()
+        refused_missing = runtime_m.complete({"session_id": "m", "tool_call_id": "1"})
+        real = work_m / "real.md"
+        real.write_text("x\n", encoding="utf-8")
+        missing_path.symlink_to(real)
+        refused_symlink = runtime_m.complete({"session_id": "m", "tool_call_id": "2"})
+        cases.append(case(
+            "MR-13", "negative", digest,
+            {"missing_refused": True, "symlink_refused": True, "state_untouched": True},
+            {
+                "missing_refused": refused_missing.get("status") == "refused",
+                "symlink_refused": refused_symlink.get("status") == "refused",
+                "state_untouched": Path(policy_m["state_path"]).read_bytes() == before_m,
+            },
+            refused_missing.get("status") == "refused"
+            and refused_symlink.get("status") == "refused"
+            and Path(policy_m["state_path"]).read_bytes() == before_m,
+            branch="predicate_refusal",
+        ))
+
+        # MR-14 = V14 restart after COMPLETED
+        os.environ.pop("HERMES_MISSION_RESUME", None)
+        completed_entry = MissionRuntime.from_environment()
+        # reload the completed fixture from MR-11 paths
+        os.environ["HERMES_MISSION_PATH"] = str(Path(policy_c["state_path"]).parent.parent / "MISSION.md")
+        os.environ["HERMES_MISSION_POLICY"] = str(
+            Path(policy_c["state_path"]).parent.parent / "mission_policy.json"
+        )
+        os.environ["HERMES_MISSION_POLICY_SHA256"] = sha(Path(os.environ["HERMES_MISSION_POLICY"]))
+        before_c = Path(policy_c["state_path"]).read_bytes()
+        loaded_c = MissionRuntime.from_environment()
+        os.environ["HERMES_MISSION_RESUME"] = "1"
+        loaded_c2 = MissionRuntime.from_environment()
+        cases.append(case(
+            "MR-14", "system", digest,
+            {"completed_on_entry": True, "resume_noop": True, "zero_writes": True},
+            {
+                "completed_on_entry": loaded_c.completed_on_entry,
+                "resume_noop": loaded_c2.completed_on_entry,
+                "zero_writes": Path(policy_c["state_path"]).read_bytes() == before_c,
+            },
+            loaded_c.completed_on_entry
+            and loaded_c2.completed_on_entry
+            and Path(policy_c["state_path"]).read_bytes() == before_c,
+            branch="completed_entry_guard",
+        ))
+
+        # MR-15 = V10+V11 seq ordering
+        os.environ.pop("HERMES_MISSION_RESUME", None)
+        runtime_s, policy_s = build_fixture(root / "seq")
+        from unittest.mock import patch as _patch
+        import agent.mission_runtime as mrm
+        with _patch.object(mrm, "_utc_now", side_effect=["2026-08-25T12:00:00Z", "2026-08-25T11:00:00Z"]):
+            runtime_s.block(
+                tool_name="terminal",
+                tool_args={"command": GATED_COMMAND},
+                tool_result=json.dumps({"status": "blocked", "error": "x"}),
+                session_id="seq",
+                tool_call_id="1",
+            )
+        state_s = json.loads(Path(policy_s["state_path"]).read_text())
+        seqs = [h["seq"] for h in state_s["history"] if "seq" in h]
+        cases.append(case(
+            "MR-15", "system", digest,
+            {"seq_increasing": True, "state_revision": True},
+            {
+                "seq_increasing": seqs == sorted(seqs) and len(seqs) >= 1,
+                "state_revision": isinstance(state_s.get("state_revision"), int)
+                and state_s["state_revision"] >= 1,
+            },
+            seqs == sorted(seqs) and state_s.get("state_revision", 0) >= 1,
+            branch="ordering_contract",
+        ))
+
+        # MR-16 = V24+V25+V34 boundary
+        runtime_b, policy_b = build_fixture(root / "boundary")
+        deny_state = runtime_b.authorize_tool(
+            "write_file", {"path": policy_b["state_path"], "content": "x"}
+        )
+        deny_exec = runtime_b.authorize_tool("execute_code", {"code": "1"})
+        deny_patch = runtime_b.authorize_tool(
+            "patch", {"mode": "patch", "patch": "*** Begin Patch\n*** End Patch"}
+        )
+        allow_replace = runtime_b.authorize_tool(
+            "patch",
+            {
+                "mode": "replace",
+                "path": str(root / "boundary" / "ok.md"),
+                "old_string": "a",
+                "new_string": "b",
+            },
+        )
+        cases.append(case(
+            "MR-16", "negative", digest,
+            {
+                "protected_write_denied": True,
+                "ceiling_denied": True,
+                "mode_patch_denied": True,
+                "mode_replace_allowed": True,
+            },
+            {
+                "protected_write_denied": deny_state.allowed is False,
+                "ceiling_denied": deny_exec.allowed is False,
+                "mode_patch_denied": deny_patch.allowed is False,
+                "mode_replace_allowed": allow_replace.allowed is True,
+            },
+            deny_state.allowed is False
+            and deny_exec.allowed is False
+            and deny_patch.allowed is False
+            and allow_replace.allowed is True,
+            branch="runtime_owned_state_boundary",
+        ))
+
     production_after = snapshot(production_paths)
     production_unchanged = production_before == production_after
     for item in cases:

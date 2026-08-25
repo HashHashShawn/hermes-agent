@@ -1183,6 +1183,26 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 error_message=getattr(_guardrail_block_decision, "message", None) or "Tool blocked by guardrail policy",
                 middleware_trace=list(middleware_trace),
             )
+        elif (
+            function_name == "mission_complete"
+            and getattr(agent, "_mission_runtime", None) is not None
+        ):
+            def _execute(next_args: dict) -> Any:
+                return agent._mission_runtime.handle_mission_complete_tool(next_args)
+
+            function_result, function_args = _run_agent_tool_execution_middleware(
+                agent,
+                function_name=function_name,
+                function_args=function_args,
+                effective_task_id=effective_task_id,
+                tool_call_id=getattr(tool_call, "id", "") or "",
+                execute=_execute,
+            )
+            tool_duration = time.time() - tool_start_time
+            if agent._should_emit_quiet_tool_messages():
+                agent._vprint(
+                    f"  {_get_cute_tool_message_impl('mission_complete', function_args, tool_duration, result=function_result)}"
+                )
         elif function_name == "todo":
             def _execute(next_args: dict) -> Any:
                 from tools.todo_tool import todo_tool as _todo_tool
@@ -1614,6 +1634,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # terminal state transition. Persist BLOCKED evidence before the model
         # can choose another command, then skip every remaining call in this
         # batch. Normal chat has no mission runtime and keeps existing behavior.
+        # Completion requests are resolved on this same serial path (§C.3 / §E.2).
         _mission_runtime = getattr(agent, "_mission_runtime", None)
         if _mission_runtime is not None and (
             _execution_blocked
@@ -1642,6 +1663,64 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     stage=f"mission-blocked skipped tool result {skipped_name}",
                 )
             break
+
+        if _mission_runtime is not None and _mission_runtime.result_requests_completion(
+            function_result
+        ):
+            _completion = _mission_runtime.complete(
+                {
+                    "session_id": getattr(agent, "session_id", "") or "",
+                    "tool_call_id": getattr(tool_call, "id", "") or "",
+                    "unresolved_followups": (
+                        json.loads(function_result).get("unresolved_followups")
+                        if isinstance(function_result, str)
+                        else []
+                    ),
+                }
+            )
+            if (
+                isinstance(_completion, dict)
+                and _completion.get("verdict") == "COMPLETED"
+            ):
+                agent._mission_runtime_halt = _completion
+                # Replace the tool result with the committed receipt reference.
+                messages[-1] = make_tool_result_message(
+                    function_name,
+                    json.dumps(
+                        {
+                            "status": "completed",
+                            "receipt_path": _completion.get("receipt_path"),
+                            "verdict": "COMPLETED",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call.id,
+                )
+                for skipped_tc in assistant_message.tool_calls[i:]:
+                    skipped_name = skipped_tc.function.name
+                    messages.append(make_tool_result_message(
+                        skipped_name,
+                        json.dumps({
+                            "status": "skipped",
+                            "error": (
+                                "Mission already transitioned to COMPLETED; "
+                                "alternate tool path was not executed."
+                            ),
+                        }),
+                        skipped_tc.id,
+                    ))
+                    _flush_session_db_after_tool_progress(
+                        agent,
+                        messages,
+                        stage=f"mission-completed skipped tool result {skipped_name}",
+                    )
+                break
+            # Structured refusal — not terminal; surface to the model.
+            messages[-1] = make_tool_result_message(
+                function_name,
+                json.dumps(_completion, ensure_ascii=False),
+                tool_call.id,
+            )
 
         # ── Per-tool /steer drain ───────────────────────────────────
         # Drain pending steer BETWEEN individual tool calls so the
