@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -116,6 +117,11 @@ def main() -> int:
     digest = hashlib.sha256(
         "".join(sha(path) for path in source_paths).encode("ascii")
     ).hexdigest()
+    source_tip = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+    ).strip()
     cases = []
 
     with tempfile.TemporaryDirectory(prefix="hermes-mission-acceptance-") as tmp:
@@ -253,7 +259,9 @@ def main() -> int:
             item["result"] = "FAIL"
     result = {
         "schema": "hermes.mission-runtime.acceptance.v1",
+        "source_tip": source_tip,
         "subject_digest": digest,
+        "subject_files": {str(path): sha(path) for path in source_paths},
         "case_order": [item["case_id"] for item in cases],
         "required_control_classes": ["positive", "negative", "system"],
         "observed_control_classes": sorted({item["control_class"] for item in cases}),
