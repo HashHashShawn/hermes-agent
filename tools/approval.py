@@ -2248,6 +2248,36 @@ def check_all_command_guards(command: str, env_type: str,
                        sudo_guess_desc, command[:200])
         return _sudo_stdin_block_result(sudo_guess_desc)
 
+    # A strict mission uses a hash-bound, exact terminal allowlist. Resolve it
+    # before normal interactive approval handling so an unavailable permission
+    # stops immediately instead of asking a founder or inviting command
+    # substitution. Hardline and sudo-stdin floors above remain absolute.
+    try:
+        from agent.mission_runtime import get_active_mission_runtime
+        mission_runtime = get_active_mission_runtime()
+    except Exception:
+        mission_runtime = None
+    if mission_runtime is not None:
+        mission_decision = mission_runtime.authorize_terminal(command)
+        if mission_decision.allowed:
+            return {
+                "approved": True,
+                "message": None,
+                "mission_approved": True,
+                "description": mission_decision.reason,
+            }
+        return {
+            "approved": False,
+            "message": (
+                "BLOCKED: Mission permission unavailable. "
+                f"{mission_decision.reason}. Do NOT retry, rephrase, or attempt "
+                "the same outcome through another command or tool."
+            ),
+            "status": "mission_blocked",
+            "outcome": "mission_permission_unavailable",
+            "user_consent": False,
+        }
+
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
     approval_mode = _get_approval_mode()

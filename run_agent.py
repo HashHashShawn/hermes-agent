@@ -5606,14 +5606,22 @@ class AIAgent:
         # Allow _vprint during tool execution even with stream consumers
         self._executing_tools = True
         try:
-            if not _should_parallelize_tool_batch(tool_calls):
-                return self._execute_tool_calls_sequential(
+            from agent.mission_runtime import activate_mission_runtime
+            with activate_mission_runtime(getattr(self, "_mission_runtime", None)):
+                # Strict missions serialize tool calls. If one call is blocked,
+                # no sibling command may already be running as an alternate
+                # path around the missing permission.
+                if (
+                    getattr(self, "_mission_runtime", None) is not None
+                    or not _should_parallelize_tool_batch(tool_calls)
+                ):
+                    return self._execute_tool_calls_sequential(
+                        assistant_message, messages, effective_task_id, api_call_count
+                    )
+
+                return self._execute_tool_calls_concurrent(
                     assistant_message, messages, effective_task_id, api_call_count
                 )
-
-            return self._execute_tool_calls_concurrent(
-                assistant_message, messages, effective_task_id, api_call_count
-            )
         finally:
             self._executing_tools = False
 

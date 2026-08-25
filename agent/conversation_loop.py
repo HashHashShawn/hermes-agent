@@ -608,6 +608,13 @@ def run_conversation(
     truncated_response_parts: List[str] = []
     compression_attempts = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
+    _mission_runtime = getattr(agent, "_mission_runtime", None)
+    _mission_blocked_on_entry = bool(
+        _mission_runtime is not None and _mission_runtime.blocked_on_entry
+    )
+    if _mission_blocked_on_entry:
+        _turn_exit_reason = "mission_blocked_on_entry"
+        final_response = _mission_runtime.halt_response
 
     # Per-turn tally of consecutive successful credential-pool token refreshes,
     # keyed by (provider, pool-entry-id). A persistent upstream 401 lets
@@ -630,7 +637,7 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
-    while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
+    while not _mission_blocked_on_entry and ((api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call):
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
 
@@ -4530,6 +4537,21 @@ def run_conversation(
                         pass
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+
+                if getattr(agent, "_mission_runtime_halt", None) is not None:
+                    _turn_exit_reason = "mission_blocked"
+                    final_response = agent._mission_runtime.halt_response
+                    messages.append({"role": "assistant", "content": final_response})
+                    agent._emit_status(f"MISSION BLOCKED: {agent._mission_runtime.mission_id}")
+                    if final_response:
+                        agent._safe_print(f"\n{final_response}\n")
+                        if agent.stream_delta_callback:
+                            try:
+                                agent.stream_delta_callback(final_response)
+                                agent.stream_delta_callback(None)
+                            except Exception:
+                                pass
+                    break
 
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision

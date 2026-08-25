@@ -298,6 +298,19 @@ def init_agent(
     agent.quiet_mode = quiet_mode
     agent.tool_progress_mode = tool_progress_mode
     agent.ephemeral_system_prompt = ephemeral_system_prompt
+    # Optional strict mission runtime. It is inactive for normal Hermes chat.
+    # A hash-bound mission injects its complete durable contract and state into
+    # working context before the first model call.
+    from agent.mission_runtime import MissionRuntime
+    agent._mission_runtime = MissionRuntime.from_environment()
+    agent._mission_runtime_halt = None
+    if agent._mission_runtime is not None:
+        mission_prompt = agent._mission_runtime.prompt_block
+        agent.ephemeral_system_prompt = (
+            f"{agent.ephemeral_system_prompt}\n\n{mission_prompt}"
+            if agent.ephemeral_system_prompt
+            else mission_prompt
+        )
     agent.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
     agent._user_id = user_id  # Platform user identifier (gateway sessions)
     agent._user_id_alt = user_id_alt  # Optional stable alternate platform identifier

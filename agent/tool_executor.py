@@ -1591,6 +1591,39 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             stage=f"tool result {function_name}",
         )
 
+        # A strict mission treats any blocked/approval-required result as a
+        # terminal state transition. Persist BLOCKED evidence before the model
+        # can choose another command, then skip every remaining call in this
+        # batch. Normal chat has no mission runtime and keeps existing behavior.
+        _mission_runtime = getattr(agent, "_mission_runtime", None)
+        if _mission_runtime is not None and (
+            _execution_blocked
+            or _mission_runtime.result_requires_stop(function_result)
+        ):
+            agent._mission_runtime_halt = _mission_runtime.block(
+                tool_name=function_name,
+                tool_args=function_args,
+                tool_result=function_result,
+                session_id=getattr(agent, "session_id", "") or "",
+                tool_call_id=getattr(tool_call, "id", "") or "",
+            )
+            for skipped_tc in assistant_message.tool_calls[i:]:
+                skipped_name = skipped_tc.function.name
+                messages.append(make_tool_result_message(
+                    skipped_name,
+                    json.dumps({
+                        "status": "skipped",
+                        "error": "Mission already transitioned to BLOCKED; alternate tool path was not executed.",
+                    }),
+                    skipped_tc.id,
+                ))
+                _flush_session_db_after_tool_progress(
+                    agent,
+                    messages,
+                    stage=f"mission-blocked skipped tool result {skipped_name}",
+                )
+            break
+
         # ── Per-tool /steer drain ───────────────────────────────────
         # Drain pending steer BETWEEN individual tool calls so the
         # injection lands as soon as a tool finishes — not after the
