@@ -202,3 +202,33 @@ def test_executor_stops_batch_after_first_blocked_result(tmp_path, monkeypatch):
     assert len(messages) == 2
     assert json.loads(messages[1]["content"])["status"] == "skipped"
     assert Path(payload["receipt_path"]).is_file()
+
+
+def test_blocked_mission_rejects_background_resume_before_model_call(tmp_path, monkeypatch):
+    runtime, _ = _fixture(tmp_path, monkeypatch)
+    runtime.block(
+        tool_name="terminal",
+        tool_args={"command": GATED_COMMAND},
+        tool_result=json.dumps({"status": "blocked", "error": "approval unavailable"}),
+        session_id="session-1",
+        tool_call_id="call-1",
+    )
+    from run_agent import AIAgent
+
+    with (
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="http://127.0.0.1:8000/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    agent.client = MagicMock()
+    result = agent.run_conversation("background process completed")
+
+    assert "MISSION BLOCKED" in result["final_response"]
+    agent.client.chat.completions.create.assert_not_called()
