@@ -82,6 +82,15 @@ def build_fixture(root: Path) -> tuple[MissionRuntime, dict]:
     return MissionRuntime.from_environment(), policy
 
 
+def disclosed_terminal_commands(prompt: str) -> list[str]:
+    lines = prompt.splitlines()
+    commands = []
+    for index, line in enumerate(lines):
+        if line.startswith("--- EXACT TERMINAL COMMAND "):
+            commands.append(lines[index + 1])
+    return commands
+
+
 def case(case_id, control_class, digest, expected, actual, passed, *, branch):
     return {
         "case_id": case_id,
@@ -111,6 +120,7 @@ def main() -> int:
     source_paths = [
         Path(__file__).resolve(),
         Path(__file__).resolve().parents[1] / "agent" / "mission_runtime.py",
+        Path(__file__).resolve().parents[1] / "agent" / "agent_init.py",
         Path(__file__).resolve().parents[1] / "agent" / "tool_executor.py",
         Path(__file__).resolve().parents[1] / "tools" / "approval.py",
     ]
@@ -151,11 +161,18 @@ def main() -> int:
             started = time.monotonic()
             gated = check_all_command_guards(GATED_COMMAND, "local")
             elapsed_ms = int((time.monotonic() - started) * 1000)
+            from tools.terminal_tool import terminal_tool
+            gated_execution = terminal_tool(
+                command=GATED_COMMAND,
+                timeout=15,
+                task_id="mission-runtime-acceptance",
+                session_id="mission-runtime-acceptance",
+            )
         cases.append(case(
             "MR-02", "negative", digest,
-            {"approved": False, "status": "mission_blocked", "max_elapsed_ms": 500},
-            {"approved": gated.get("approved"), "status": gated.get("status"), "elapsed_ms": elapsed_ms},
-            gated.get("approved") is False and gated.get("status") == "mission_blocked" and elapsed_ms < 500,
+            {"approved": False, "status": "mission_blocked", "max_elapsed_ms": 500, "real_result_requires_stop": True},
+            {"approved": gated.get("approved"), "status": gated.get("status"), "elapsed_ms": elapsed_ms, "real_result_requires_stop": runtime.result_requires_stop(gated_execution)},
+            gated.get("approved") is False and gated.get("status") == "mission_blocked" and elapsed_ms < 500 and runtime.result_requires_stop(gated_execution),
             branch="permission_unavailable_stop",
         ))
 
@@ -251,6 +268,22 @@ def main() -> int:
             branch="policy_hash_fail_closed",
         ))
 
+        # Engineered RED: the disclosure/enforcement coupling check must catch
+        # a command present in a disclosed copy but absent from enforcement.
+        disclosed = disclosed_terminal_commands(runtime2.prompt_block)
+        enforced = set(runtime2.terminal_read_allowlist)
+        coupling_before = set(disclosed) == enforced and len(disclosed) == len(enforced)
+        mutated_disclosure = [*disclosed, "id"]
+        red_observed = set(mutated_disclosure) != enforced
+        fixture_restored = disclosed_terminal_commands(runtime2.prompt_block) == disclosed
+        cases.append(case(
+            "MR-08", "negative", digest,
+            {"coupling_before": True, "engineered_red_observed": True, "fixture_restored": True},
+            {"coupling_before": coupling_before, "engineered_red_observed": red_observed, "fixture_restored": fixture_restored},
+            coupling_before and red_observed and fixture_restored,
+            branch="disclosure_enforcement_coupling",
+        ))
+
     production_after = snapshot(production_paths)
     production_unchanged = production_before == production_after
     for item in cases:
@@ -265,7 +298,10 @@ def main() -> int:
         "case_order": [item["case_id"] for item in cases],
         "required_control_classes": ["positive", "negative", "system"],
         "observed_control_classes": sorted({item["control_class"] for item in cases}),
-        "engineered_red_observed": any(item["case_id"] == "MR-07" and item["result"] == "PASS" for item in cases),
+        "engineered_red_observed": all(
+            any(item["case_id"] == case_id and item["result"] == "PASS" for item in cases)
+            for case_id in ("MR-07", "MR-08")
+        ),
         "production_before": production_before,
         "production_after": production_after,
         "production_unchanged": production_unchanged,

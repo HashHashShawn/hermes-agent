@@ -211,6 +211,18 @@ class MissionRuntime:
 
     @property
     def prompt_block(self) -> str:
+        terminal_commands = "\n".join(
+            f"--- EXACT TERMINAL COMMAND {index} ---\n{command}\n"
+            f"--- END EXACT TERMINAL COMMAND {index} ---"
+            for index, command in enumerate(
+                sorted(self.terminal_read_allowlist), start=1
+            )
+        )
+        notification_path = (
+            str(self.notification_path)
+            if self.notification_path is not None
+            else "UNCONFIGURED"
+        )
         return (
             "STRICT HASH-BOUND MISSION RUNTIME\n"
             f"Mission: {self.mission_id}\n"
@@ -220,6 +232,23 @@ class MissionRuntime:
             "deliverables, stop rules, or the next legal action. A blocked tool "
             "result is terminal for this run. Do not retry, rephrase, substitute "
             "another command, or shop for permission.\n\n"
+            "--- COMPILED EXECUTION ENVELOPE ---\n"
+            f"Policy SHA-256: {self.policy_sha256}\n"
+            "A terminal command is admitted only when, after leading and trailing "
+            "whitespace is stripped, it byte-matches one complete command line "
+            "listed below. Copy an admitted command exactly. Chaining, redirection, "
+            "alternate paths, network access, or any other terminal command will "
+            "durably BLOCK the mission. After a blocked result, do not retry, "
+            "rephrase, or substitute another command or tool path. Use the file "
+            "tool for permitted reads that are not listed terminal commands.\n"
+            f"{terminal_commands}\n"
+            "--- RESOLVED MISSION ARTIFACT PATHS ---\n"
+            f"state_path: {self.state_path}\n"
+            f"report_path: {self.report_path}\n"
+            f"receipt_path: {self.receipt_path}\n"
+            f"checkpoint_path: {self.checkpoint_path}\n"
+            f"notification_path: {notification_path}\n"
+            "--- END COMPILED EXECUTION ENVELOPE ---\n\n"
             "--- MISSION.md ---\n"
             f"{self.contract_text.rstrip()}\n"
             "--- CURRENT MISSION STATE ---\n"

@@ -15,6 +15,7 @@ from agent.mission_runtime import (
 
 
 SAFE_HEALTH = "/usr/bin/systemctl is-active qwen36-vllm.service"
+SAFE_IDENTITY = "git -C /home/artemis/hermes-dev rev-parse HEAD"
 GATED_COMMAND = "sudo systemctl restart qwen36-vllm.service"
 
 
@@ -54,7 +55,7 @@ def _fixture(tmp_path: Path, monkeypatch):
         "receipt_path": str(work / "receipt.json"),
         "checkpoint_path": str(mission / "receipts" / "blocked.json"),
         "notification_path": str(mail / "BLOCK.md"),
-        "terminal_read_allowlist": [SAFE_HEALTH],
+        "terminal_read_allowlist": [SAFE_HEALTH, SAFE_IDENTITY],
     }
     policy.write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setenv("HERMES_MISSION_PATH", str(contract))
@@ -63,11 +64,58 @@ def _fixture(tmp_path: Path, monkeypatch):
     return MissionRuntime.from_environment(), payload
 
 
+def _disclosed_terminal_commands(prompt: str) -> list[str]:
+    lines = prompt.splitlines()
+    commands = []
+    for index, line in enumerate(lines):
+        if line.startswith("--- EXACT TERMINAL COMMAND "):
+            commands.append(lines[index + 1])
+    return commands
+
+
 def test_contract_and_state_are_loaded_into_working_context(tmp_path, monkeypatch):
     runtime, _ = _fixture(tmp_path, monkeypatch)
     assert "Inspect runtime truth." in runtime.prompt_block
     assert "Write REPORT.md and receipt.json." in runtime.prompt_block
     assert "Run the health read." in runtime.prompt_block
+
+
+def test_compiled_envelope_disclosure_matches_enforcement(tmp_path, monkeypatch):
+    runtime, policy = _fixture(tmp_path, monkeypatch)
+    disclosed = _disclosed_terminal_commands(runtime.prompt_block)
+
+    assert set(disclosed) == runtime.terminal_read_allowlist
+    assert len(disclosed) == len(runtime.terminal_read_allowlist)
+    assert all(runtime.authorize_terminal(command).allowed for command in disclosed)
+    assert f"Policy SHA-256: {runtime.policy_sha256}" in runtime.prompt_block
+    for field in (
+        "state_path",
+        "report_path",
+        "receipt_path",
+        "checkpoint_path",
+        "notification_path",
+    ):
+        assert f"{field}: {policy[field]}" in runtime.prompt_block
+
+
+@pytest.mark.parametrize("suffix", [" | python3 -m json.tool", " 2>/dev/null", "; id"])
+def test_disclosed_command_variations_remain_blocked(
+    tmp_path, monkeypatch, suffix
+):
+    runtime, _ = _fixture(tmp_path, monkeypatch)
+    assert runtime.authorize_terminal(f"{SAFE_HEALTH}{suffix}").allowed is False
+
+
+def test_shell_operator_in_policy_fails_closed_before_disclosure(tmp_path, monkeypatch):
+    _, payload = _fixture(tmp_path, monkeypatch)
+    policy_path = Path(payload["state_path"]).parent.parent / "mission_policy.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["terminal_read_allowlist"].append(f"{SAFE_HEALTH}; id")
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    monkeypatch.setenv("HERMES_MISSION_POLICY_SHA256", _sha(policy_path))
+
+    with pytest.raises(MissionRuntimeError, match="shell operators"):
+        MissionRuntime.from_environment()
 
 
 def test_exact_health_read_is_allowed_and_shell_variation_is_not(tmp_path, monkeypatch):
@@ -92,6 +140,21 @@ def test_compiled_health_read_bypasses_prompt_and_gated_command_stops_fast(tmp_p
     assert gated["status"] == "mission_blocked"
     assert "Do NOT retry" in gated["message"]
     assert elapsed < 0.5
+
+
+def test_real_gated_terminal_result_requires_mission_stop(tmp_path, monkeypatch):
+    runtime, _ = _fixture(tmp_path, monkeypatch)
+    from tools.terminal_tool import terminal_tool
+
+    with activate_mission_runtime(runtime):
+        result = terminal_tool(
+            command=GATED_COMMAND,
+            timeout=15,
+            task_id="mission-runtime-unit",
+            session_id="mission-runtime-unit",
+        )
+
+    assert runtime.result_requires_stop(result) is True
 
 
 def test_block_writes_state_report_receipt_checkpoint_and_notification(tmp_path, monkeypatch):
@@ -202,6 +265,31 @@ def test_executor_stops_batch_after_first_blocked_result(tmp_path, monkeypatch):
     assert len(messages) == 2
     assert json.loads(messages[1]["content"])["status"] == "skipped"
     assert Path(payload["receipt_path"]).is_file()
+
+
+def test_compiled_envelope_reaches_agent_ephemeral_prompt(tmp_path, monkeypatch):
+    runtime, _ = _fixture(tmp_path, monkeypatch)
+    from run_agent import AIAgent
+
+    with (
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="http://127.0.0.1:8000/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    assert agent._mission_runtime is not None
+    assert f"Policy SHA-256: {runtime.policy_sha256}" in agent.ephemeral_system_prompt
+    assert all(
+        command in agent.ephemeral_system_prompt
+        for command in runtime.terminal_read_allowlist
+    )
 
 
 def test_blocked_mission_rejects_background_resume_before_model_call(tmp_path, monkeypatch):
