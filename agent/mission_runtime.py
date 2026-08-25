@@ -321,39 +321,23 @@ class MissionRuntime:
         self.state = current
         _atomic_json(self.state_path, current)
 
-    def block(
-        self,
-        *,
-        tool_name: str,
-        tool_args: dict[str, Any],
-        tool_result: Any,
-        session_id: str,
-        tool_call_id: str,
-    ) -> dict[str, Any]:
+    def _terminate(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Shared terminal writer for BLOCKED (and later COMPLETED).
+
+        Commit-1 seam extraction: owns the ordered artifact run for BLOCKED
+        with zero semantic change from the prior inline ``block()`` body.
+        """
+        if kind != "BLOCKED":
+            raise MissionRuntimeError(f"unsupported terminal kind: {kind}")
         if self.halt_receipt is not None:
             return self.halt_receipt
 
-        payload = _blocked_payload(tool_result) or {
-            "status": "blocked",
-            "error": str(tool_result),
-        }
-        blocked_at = _utc_now()
-        safe_args = dict(tool_args or {})
-        command = safe_args.get("command")
-        command_sha256 = (
-            _sha256_bytes(str(command).encode("utf-8")) if command is not None else None
-        )
-        blocker = {
-            "tool_name": tool_name,
-            "tool_call_id": tool_call_id,
-            "status": payload.get("status", "blocked"),
-            "error": payload.get("error") or payload.get("message") or "tool blocked",
-            "command_sha256": command_sha256,
-        }
-        next_action = (
-            "Resolve the compiled mission permission or tool-policy mismatch, then "
-            "resume from this durable BLOCKED checkpoint. Do not restate the mission."
-        )
+        blocked_at = payload["terminated_at_utc"]
+        blocker = payload["blocker"]
+        next_action = payload["next_legal_action"]
+        session_id = payload["session_id"]
+        tool_name = blocker["tool_name"]
+        tool_call_id = blocker["tool_call_id"]
 
         current = json.loads(self.state_path.read_text(encoding="utf-8"))
         history = list(current.get("history") or [])
@@ -439,6 +423,49 @@ class MissionRuntime:
 
         self.halt_receipt = receipt
         return receipt
+
+    def block(
+        self,
+        *,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        tool_result: Any,
+        session_id: str,
+        tool_call_id: str,
+    ) -> dict[str, Any]:
+        if self.halt_receipt is not None:
+            return self.halt_receipt
+
+        payload = _blocked_payload(tool_result) or {
+            "status": "blocked",
+            "error": str(tool_result),
+        }
+        blocked_at = _utc_now()
+        safe_args = dict(tool_args or {})
+        command = safe_args.get("command")
+        command_sha256 = (
+            _sha256_bytes(str(command).encode("utf-8")) if command is not None else None
+        )
+        blocker = {
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_id,
+            "status": payload.get("status", "blocked"),
+            "error": payload.get("error") or payload.get("message") or "tool blocked",
+            "command_sha256": command_sha256,
+        }
+        next_action = (
+            "Resolve the compiled mission permission or tool-policy mismatch, then "
+            "resume from this durable BLOCKED checkpoint. Do not restate the mission."
+        )
+        return self._terminate(
+            "BLOCKED",
+            {
+                "terminated_at_utc": blocked_at,
+                "blocker": blocker,
+                "next_legal_action": next_action,
+                "session_id": session_id,
+            },
+        )
 
     @property
     def halt_response(self) -> str:
